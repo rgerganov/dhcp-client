@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <errno.h>
 #include <ifaddrs.h>
@@ -63,6 +64,7 @@ typedef struct dhcp
 #define MESSAGE_TYPE_ROUTER                 3
 #define MESSAGE_TYPE_DNS                    6
 #define MESSAGE_TYPE_DOMAIN_NAME            15
+#define MESSAGE_TYPE_VENDOR_INFO            43
 #define MESSAGE_TYPE_REQ_IP                 50
 #define MESSAGE_TYPE_DHCP                   53
 #define MESSAGE_TYPE_PARAMETER_REQ_LIST     55
@@ -96,7 +98,7 @@ do{                                                                     \
 
 #define DHCP_MAGIC_COOKIE   0x63825363
 
-verbose_level_t program_verbose_level = VERBOSE_LEVEL_DEBUG;
+verbose_level_t program_verbose_level = VERBOSE_LEVEL_NONE;
 pcap_t *pcap_handle;
 u_int32_t ip;
 
@@ -114,6 +116,7 @@ print_packet(const u_int8_t *data, int len)
             printf("\n %04x :: ", i);
         printf("%02x ", data[i]);
     }
+    printf("\n");
 }
 
 /*
@@ -194,15 +197,56 @@ in_cksum(unsigned short *addr, int len)
     return (answer);
 }
 
+static void parse_vendor_options(const uint8_t *opt, int total_len)
+{
+    int offset = 0;
+    char portal[512] = {0};
+
+    while (offset < total_len-1) {
+        uint8_t code = opt[offset];
+        uint8_t len = opt[offset+1];
+        if (code == 22) {
+            memcpy(portal, opt+offset+2, len);
+            portal[len] = 0;
+            printf("%s\n", portal);
+            break;
+        }
+        offset += 2 + len;
+    }
+}
+
+static void parse_options(const uint8_t *opt, int total_len)
+{
+    int offset = 0;
+    while (offset < total_len-1) {
+        uint8_t code = opt[offset];
+        if (code == 255) {
+            break;
+        }
+        uint8_t len = opt[offset+1];
+        if (code == 43) {
+            parse_vendor_options(opt+offset+2, len);
+        }
+        offset += 2 + len;
+    }
+}
+
 /*
  * This function will be called for any incoming DHCP responses
  */
 static void
-dhcp_input(dhcp_t *dhcp)
+dhcp_input(dhcp_t *dhcp, int len)
 {
-    if (dhcp->opcode != DHCP_OPTION_OFFER)
+    if (dhcp->opcode != DHCP_BOOTREPLY)
         return;
 
+    int options_len = len - offsetof(dhcp_t, bp_options);
+    if (options_len > 0) {
+        if (program_verbose_level == VERBOSE_LEVEL_DEBUG) {
+            print_packet((const uint8_t*)dhcp->bp_options, options_len);
+        }
+        parse_options(dhcp->bp_options, options_len);
+    }
     /* Get the IP address given by the server */
     ip = ntohl(dhcp->yiaddr);
 
@@ -214,22 +258,22 @@ dhcp_input(dhcp_t *dhcp)
  * UDP packet handler
  */
 static void
-udp_input(struct udphdr * udp_packet)
+udp_input(struct udphdr * udp_packet, int len)
 {
     /* Check if there is a response from DHCP server by checking the source Port */
     if (ntohs(udp_packet->uh_sport) == DHCP_SERVER_PORT)
-        dhcp_input((dhcp_t *)((char *)udp_packet + sizeof(struct udphdr)));
+        dhcp_input((dhcp_t *)((char *)udp_packet + sizeof(struct udphdr)), len-sizeof(struct udphdr));
 }
 
 /*
  * IP Packet handler
  */
 static void
-ip_input(struct ip * ip_packet)
+ip_input(struct ip * ip_packet, int len)
 {
     /* Care only about UDP - since DHCP sits over UDP */
     if (ip_packet->ip_p == IPPROTO_UDP)
-        udp_input((struct udphdr *)((char *)ip_packet + sizeof(struct ip)));
+        udp_input((struct udphdr *)((char *)ip_packet + sizeof(struct ip)), len-sizeof(struct ip));
 }
 
 /*
@@ -242,11 +286,11 @@ ether_input(u_char *args, const struct pcap_pkthdr *header, const u_char *frame)
 
     PRINT(VERBOSE_LEVEL_DEBUG, "Received a frame with length of [%d]", header->len);
 
-    if (program_verbose_level == VERBOSE_LEVEL_DEBUG)
-        print_packet(frame, header->len);
+    //if (program_verbose_level == VERBOSE_LEVEL_DEBUG)
+    //    print_packet(frame, header->len);
 
     if (htons(eframe->ether_type) == ETHERTYPE_IP)
-        ip_input((struct ip *)(frame + sizeof(struct ether_header)));
+        ip_input((struct ip *)(frame + sizeof(struct ether_header)), header->len-sizeof(struct ether_header));
 }
 
 /*
@@ -348,7 +392,7 @@ fill_dhcp_discovery_options(dhcp_t *dhcp)
 {
     int len = 0;
     u_int32_t req_ip;
-    u_int8_t parameter_req_list[] = {MESSAGE_TYPE_REQ_SUBNET_MASK, MESSAGE_TYPE_ROUTER, MESSAGE_TYPE_DNS, MESSAGE_TYPE_DOMAIN_NAME};
+    u_int8_t parameter_req_list[] = {MESSAGE_TYPE_REQ_SUBNET_MASK, MESSAGE_TYPE_ROUTER, MESSAGE_TYPE_DNS, MESSAGE_TYPE_DOMAIN_NAME, MESSAGE_TYPE_VENDOR_INFO};
     u_int8_t option;
 
     option = DHCP_OPTION_DISCOVER;
@@ -399,17 +443,20 @@ main(int argc, char *argv[])
 
     if (argc < 2 || (strcmp(argv[1], "-h") == 0))
     {
-        printf("Usage: %s <interface>\n", argv[0]);
-        return 0;
+        fprintf(stderr, "Usage: %s <interface> [-d]\n", argv[0]);
+        return 1;
     }
     dev = argv[1];
+    if (argc == 3) {
+        program_verbose_level = VERBOSE_LEVEL_DEBUG;
+    }
 
     /* Get the MAC address of the interface */
     result = get_mac_address(dev, mac);
     if (result != 0)
     {
-        PRINT(VERBOSE_LEVEL_ERROR, "Unable to get MAC address for %s", dev);
-        return -1;
+        fprintf(stderr, "Unable to get MAC address for %s\n", dev);
+        return 1;
     }
     PRINT(VERBOSE_LEVEL_INFO, "%s MAC : %02X:%02X:%02X:%02X:%02X:%02X",
           dev, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -418,15 +465,15 @@ main(int argc, char *argv[])
     pcap_handle = pcap_open_live(dev, BUFSIZ, 0, 10, errbuf);
     if (pcap_handle == NULL)
     {
-        PRINT(VERBOSE_LEVEL_ERROR, "Couldn't open device %s: %s", dev, errbuf);
-        return -1;
+        fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+        return 1;
     }
 
     /* Send DHCP DISCOVERY packet */
     result = dhcp_discovery(mac);
     if (result)
     {
-        PRINT(VERBOSE_LEVEL_ERROR, "Couldn't send DHCP DISCOVERY on device %s: %s", dev, errbuf);
+        fprintf(stderr, "Couldn't send DHCP DISCOVERY on device %s: %s\n", dev, errbuf);
         goto done;
     }
 
@@ -434,7 +481,7 @@ main(int argc, char *argv[])
     PRINT(VERBOSE_LEVEL_INFO, "Waiting for DHCP_OFFER");
     /* Listen till the DHCP OFFER comes */
     pcap_loop(pcap_handle, -1, ether_input, NULL);
-    printf("Got IP %u.%u.%u.%u\n", ip >> 24, ((ip << 8) >> 24), (ip << 16) >> 24, (ip << 24) >> 24);
+    PRINT(VERBOSE_LEVEL_INFO, "Got IP %u.%u.%u.%u\n", ip >> 24, ((ip << 8) >> 24), (ip << 16) >> 24, (ip << 24) >> 24);
 
 done:
     pcap_close(pcap_handle);
