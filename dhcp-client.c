@@ -31,6 +31,8 @@ typedef u_int32_t ip4_t;
 #define DHCP_SNAME_LEN  64
 #define DHCP_FILE_LEN   128
 
+const char *VENDOR_ID = "EurolanTH100";
+
 /*
  * http://www.tcpipguide.com/free/t_DHCPMessageFormat.htm
  */
@@ -68,6 +70,7 @@ typedef struct dhcp
 #define MESSAGE_TYPE_REQ_IP                 50
 #define MESSAGE_TYPE_DHCP                   53
 #define MESSAGE_TYPE_PARAMETER_REQ_LIST     55
+#define MESSAGE_TYPE_VENDOR_ID              60
 #define MESSAGE_TYPE_END                    255
 
 #define DHCP_OPTION_DISCOVER                1
@@ -400,6 +403,7 @@ fill_dhcp_discovery_options(dhcp_t *dhcp)
     req_ip = htonl(0xc0a8010a);
     len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_REQ_IP, (u_int8_t *)&req_ip, sizeof(req_ip));
     len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_PARAMETER_REQ_LIST, (u_int8_t *)&parameter_req_list, sizeof(parameter_req_list));
+    len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_VENDOR_ID, (u_int8_t *)VENDOR_ID, strlen(VENDOR_ID));
     option = 0;
     len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_END, &option, sizeof(option));
 
